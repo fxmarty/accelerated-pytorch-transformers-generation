@@ -166,7 +166,7 @@ if model.config.model_type != "llama":
 
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
-NEW_TOKENS = [50]
+NEW_TOKENS = [200]
 
 for batch_size in tqdm(BATCH_SIZES):
     for prompt_length in tqdm(PROMPT_LENGTHS):

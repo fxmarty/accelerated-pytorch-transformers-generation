@@ -29,6 +29,22 @@ batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash
 
 The `hash` is used to "make sure" (see TODOS) the implementation is on par with transformers
 
+The default
+
+```python
+BATCH_SIZES = [1]
+PROMPT_LENGTHS = [1000]
+NEW_TOKENS = [200]
+```
+
+can be edited to run a sweep, for example:
+
+```python
+BATCH_SIZES = [1, 2, 4, 8]
+PROMPT_LENGTHS = [500, 1000, 4000]
+NEW_TOKENS = [1000]
+```
+
 ## TODOS
 
 - [ ] Experiment with `torch.compile`
