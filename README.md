@@ -1,3 +1,9 @@
+## Install
+
+```
+pip install -e .
+```
+
 ## Running LLAMA
 
 Below on AMD EPYC 7R32 + A10G (g5.2xlarge).
