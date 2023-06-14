@@ -8,10 +8,10 @@ import hashlib
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from trfs_prealloc.llama import LlamaForCausalLM
+from trfs_fast.llama import LlamaForCausalLM
 from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
 
-from trfs_prealloc.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
+from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
 import argparse
 import copy
