@@ -2,21 +2,28 @@ from tqdm import tqdm
 
 import torch
 
-from typing import Tuple
+from typing import Tuple, Dict
 
 import hashlib
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from trfs_prealloc.llama import LlamaForCausalLM
+from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
+
+from trfs_prealloc.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
 import argparse
+import copy
+
 
 parser = argparse.ArgumentParser()
+
+# TODO: support other archs than llama
 parser.add_argument(
     "--model",
     type=str,
-    default="gpt2",
+    default="huggingface/llama-7b",
     help="",
 )
 parser.add_argument(
@@ -34,69 +41,24 @@ parser.add_argument(
 )
 
 
-def timing_cuda_minimal(
-    model: torch.nn.Module,
+def timing_cuda(
     tokenizer,
+    generate_method,
     num_runs: int,
-    inputs: torch.LongTensor,
+    inputs: Dict,
     max_new_tokens: int,
     device: torch.device,
     cache_length: int,
+    preallocate: bool,
 ):
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    config = model.config
+    if preallocate:
+        inputs["cache_length"] = cache_length
 
     with torch.inference_mode():
-        res = model.generate_minimal(
-            **inputs,
-            min_new_tokens=max_new_tokens,
-            max_new_tokens=max_new_tokens,
-            cache_length=cache_length,
-        )
-
-        torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-        start_event.record()
-
-        for _ in tqdm(range(num_runs)):
-            res = model.generate_minimal(
-                **inputs,
-                min_new_tokens=max_new_tokens,
-                max_new_tokens=max_new_tokens,
-                cache_length=cache_length,
-            )
-
-        end_event.record()
-        torch.cuda.synchronize()
-        max_memory = torch.cuda.max_memory_allocated(device)
-
-    h = hashlib.new('sha256')
-    h.update(str(tokenizer.batch_decode(res)).encode())
-
-    sha_hash = h.hexdigest()
-
-    return (start_event.elapsed_time(end_event) * 1.0e-3) / num_runs, max_memory * 1e-6, sha_hash
-
-def timing_cuda_trfs(
-    model: torch.nn.Module,
-    tokenizer,
-    num_runs: int,
-    inputs: torch.LongTensor,
-    max_new_tokens: int,
-    device: torch.device,
-    cache_length: int,
-):
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    config = model.config
-
-    with torch.inference_mode():
-        res = model.generate(
+        res = generate_method(
             **inputs,
             min_new_tokens=max_new_tokens,
             max_new_tokens=max_new_tokens,
@@ -106,10 +68,19 @@ def timing_cuda_trfs(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+        """
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
+        ):
+        """
         start_event.record()
 
         for _ in tqdm(range(num_runs)):
-            res = model.generate(
+            res = generate_method(
                 **inputs,
                 min_new_tokens=max_new_tokens,
                 max_new_tokens=max_new_tokens,
@@ -150,16 +121,52 @@ if args.preallocate == "yes":
 else:
     preallocate = False
 
-with device:
-    if preallocate:
+if preallocate:
+    with device:
+        original_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
+    with torch.device("meta"):
         model = LlamaForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
-    else:
+
+        # replace back parameters and buffers that were untouched by the bettertransformer transform
+        for path, param in model.state_dict().items():
+            if "k_proj" not in path and "v_proj" not in path and "min_allowed" not in path:
+                recurse_setattr(model, path, copy.deepcopy(recurse_getattr(original_model, path)))
+
+                recurse_delattr(original_model, path)  # save mem
+
+        # some buffers may be non-persistent, hence not in the state_dict (as token_type_ids for some models)
+        for path, param in model.named_buffers():
+            if "k_proj" not in path and "v_proj" not in path and "min_allowed" not in path:
+                if recurse_hasattr(original_model, path):
+                    recurse_setattr(model, path, copy.deepcopy(recurse_getattr(original_model, path)))
+
+                    recurse_delattr(original_model, path)  # save mem
+            if "min_allowed" in path:
+                recurse_setattr(model, path, torch.tensor(torch.finfo(dtype).min, device=device))
+
+        for name, module in model.named_parameters():
+            if "kv_proj" in name:
+                base_root_key = ".".join(name.split(".")[:-2]) + ".k_proj.weight"
+                base_root_value = ".".join(name.split(".")[:-2]) + ".v_proj.weight"
+                root = ".".join(name.split(".")[:-1]) + ".weight"
+
+                weight = torch.nn.Parameter(torch.cat([
+                    copy.deepcopy(recurse_getattr(original_model, base_root_key)), copy.deepcopy(recurse_getattr(original_model, base_root_value))
+                ], dim=0))
+
+                recurse_setattr(model, name, weight)
+
+        del original_model
+else:
+    with device:
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
 
+if model.config.model_type != "llama":
+    raise ValueError("This script currently only supports LLAMA")
 
 BATCH_SIZES = [1]
-PROMPT_LENGTHS = [200]
-NEW_TOKENS = [800]
+PROMPT_LENGTHS = [1000]
+NEW_TOKENS = [50]
 
 for batch_size in tqdm(BATCH_SIZES):
     for prompt_length in tqdm(PROMPT_LENGTHS):
@@ -173,19 +180,19 @@ for batch_size in tqdm(BATCH_SIZES):
 
             h = hashlib.new('sha256')
             h.update(str(inp).encode())
-            print("Input hash:", h.hexdigest()[:8])
+            print("\nInput hash:", h.hexdigest()[:8])
             print("Cache preallocation:", preallocate)
 
-            timing_func = timing_cuda_minimal if preallocate else timing_cuda_trfs
-
-            time_per_generation, max_memory, sha_hash = timing_func(
-                model=model,
+            generate_method = model.generate_minimal if preallocate else model.generate
+            time_per_generation, max_memory, sha_hash = timing_cuda(
                 tokenizer=tokenizer,
-                num_runs=5,
+                num_runs=3,
                 inputs=inp,
                 device=device,
                 max_new_tokens=max_new_tokens,
                 cache_length=cache_length,
+                generate_method=generate_method,
+                preallocate=preallocate,
             )
 
             tok_per_s = max_new_tokens / time_per_generation
@@ -202,3 +209,4 @@ print(header)
 for key, value in stats.items():
     batch_size, prompt_length, new_tokens = key
     print(",".join([str(batch_size), str(prompt_length), str(new_tokens), str(value["cache_length"]), args.dtype, f"{value['tok_per_s']:.3f}", f"{value['max_mem']:.2f}", value["hash"]]))
+
