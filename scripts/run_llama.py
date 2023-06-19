@@ -1,21 +1,22 @@
-from tqdm import tqdm
-
-import torch
-
+import argparse
+import copy
+import hashlib
+import os
 from typing import Tuple, Dict
 
-import hashlib
+from tqdm import tqdm
+import torch
+from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
+
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from trfs_fast.llama import LlamaForCausalLM
-from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
-
 from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
-import argparse
-import copy
 
+# Debugging torch.compile
+os.environ["TORCHDYNAMO_REPORT_GUARD_FAILURES"] = "1"
 
 parser = argparse.ArgumentParser()
 
@@ -163,7 +164,7 @@ else:
 
 
 if args.compile:
-    model.forward = torch.compile(model.forward, mode="reduce-overhead", dynamic=True)
+    model.forward = torch.compile(model.forward, mode="reduce-overhead")
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
