@@ -40,8 +40,10 @@ parser.add_argument(
 )
 parser.add_argument(
     "--compile",
-    action='store_true',
-    help="Whether to compile the model forward pass with torch.compile",
+    type=str,
+    choices=["no", "static", "dynamic"],
+    default="no",
+    help="If (and how) to compile the model forward pass with torch.compile",
 )
 
 
@@ -163,8 +165,9 @@ else:
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
 
 
-if args.compile:
-    model.forward = torch.compile(model.forward, mode="reduce-overhead")
+if args.compile != "no":
+    dynamic = args.compile == "dynamic"
+    model.forward = torch.compile(model.forward, mode="reduce-overhead", dynamic=dynamic)
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
