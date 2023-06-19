@@ -250,12 +250,12 @@ class GenerationPrefill:
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
             )
         """
-        position_ids = model_inputs.get("position_ids", None)
+        position_ids = model_inputs["position_ids"]
         if position_ids.shape[1] > 1:
-            model_kwargs["position_ids"] = position_ids[:, -2:-1] + 1
+            model_kwargs["position_ids"] = position_ids[:, -1:] + 1
         else:
             model_kwargs["position_ids"] = position_ids + 1
-
+        
         # NOTE: token_type_ids is not used by llama so we don't care about this one for now
         # update token_type_ids with last value
         if "token_type_ids" in model_kwargs:
