@@ -248,7 +248,7 @@ class LlamaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
 
         # TODO (felix) returning past_key_value with static cache is probably useless?
-        return attn_output, None, past_key_value
+        return attn_output, None, None
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -469,8 +469,9 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
         if attention_mask is not None:
+            attention_mask_buffer = attention_mask[:, :past_key_values_length + input_shape[-1]]
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
+            expanded_attn_mask = _expand_mask(attention_mask_buffer, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
                 inputs_embeds.device
             )
             combined_attention_mask = (
@@ -511,10 +512,7 @@ class LlamaModel(LlamaPreTrainedModel):
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
-        if valid_past_index > 0:
-            past_key_values_length = valid_past_index + 1
-        else:
-            past_key_values_length = 0
+        past_key_values_length = valid_past_index
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -524,7 +522,7 @@ class LlamaModel(LlamaPreTrainedModel):
             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
-
+        
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         # embed positions
@@ -532,9 +530,12 @@ class LlamaModel(LlamaPreTrainedModel):
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-        )
+        
+        # As we use SDPA, we simply don't care about the attention mask in the batch size = 1 case
+        if batch_size > 1:
+            attention_mask = self._prepare_decoder_attention_mask(
+                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+            )
 
         hidden_states = inputs_embeds
 
@@ -641,7 +642,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
                 )
             for _ in range(self.config.num_hidden_layers)]
         return past_key_values
+    
+    def get_preallocated_attention_mask(self, attention_mask: torch.Tensor, batch_size: int, cache_length: int, device: torch.device, context_length: int):
+        attention_mask_buffer = torch.ones(batch_size, cache_length, dtype=torch.int64, device=device)
+        attention_mask_buffer[:, :context_length] = attention_mask
 
+        return attention_mask_buffer
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -740,12 +746,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
             input_ids = input_ids[:, -1:]
 
         position_ids = kwargs.get("position_ids", None)
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if valid_past_index > 0:
-                position_ids = position_ids[:, -1].unsqueeze(-1)
+        # create position_ids
+        if position_ids is None:
+            attention_mask_slice = attention_mask[:, :input_ids.shape[1]]
+            position_ids = attention_mask_slice.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask_slice == 0, 1)
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:

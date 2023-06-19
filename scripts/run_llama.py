@@ -178,6 +178,10 @@ for batch_size in tqdm(BATCH_SIZES):
                 "attention_mask": torch.ones(batch_size, prompt_length, dtype=torch.int32).to("cuda")
             }
 
+            if batch_size > 1:
+                inp["input_ids"][0, :10] = tokenizer.pad_token_id
+                inp["attention_mask"][0, :10] = 0
+
             h = hashlib.new('sha256')
             h.update(str(inp).encode())
             print("\nInput hash:", h.hexdigest()[:8])

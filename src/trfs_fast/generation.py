@@ -113,8 +113,12 @@ class GenerationPrefill:
         if streamer is not None:
             streamer.put(input_ids.cpu())
 
+        batch_size, context_length = input_ids.shape
+        cache_length = cache_length if cache_length is not None else max_new_tokens
+
         model_kwargs["valid_past_index"] = 0
-        model_kwargs["past_key_values"] = self.get_empty_kv_cache(batch_size=input_ids.shape[0], cache_length=cache_length if cache_length is not None else max_new_tokens, device=input_ids.device, dtype=self.dtype)
+        model_kwargs["past_key_values"] = self.get_empty_kv_cache(batch_size=batch_size, cache_length=cache_length, device=input_ids.device, dtype=self.dtype)
+        model_kwargs["attention_mask"] = self.get_preallocated_attention_mask(attention_mask=model_kwargs["attention_mask"], batch_size=batch_size, cache_length=cache_length, device=input_ids.device, context_length=context_length)
 
         # 11. run greedy search
         return self.greedy_search_minimal(
@@ -205,7 +209,7 @@ class GenerationPrefill:
             if streamer is not None:
                 streamer.put(next_tokens.cpu())
             model_kwargs = self.__update_model_kwargs_for_generation(
-                outputs, model_kwargs
+                outputs, model_kwargs, model_inputs
             )
 
             # if eos_token was found in one sentence, set sentence to finished
@@ -231,21 +235,31 @@ class GenerationPrefill:
         self,
         outputs: ModelOutput,
         model_kwargs: Dict[str, Any],
+        model_inputs: Dict[str, Any]
     ) -> Dict[str, Any]:
         model_kwargs["valid_past_index"] += outputs.logits.shape[1]
         
         if getattr(outputs, "state", None) is not None:
             model_kwargs["state"] = outputs.state
 
-        # update token_type_ids with last value
-        if "token_type_ids" in model_kwargs:
-            token_type_ids = model_kwargs["token_type_ids"]
-            model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
         # update attention mask
+        """
         if "attention_mask" in model_kwargs:
             attention_mask = model_kwargs["attention_mask"]
             model_kwargs["attention_mask"] = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
             )
+        """
+        position_ids = model_inputs["position_ids"]
+        if position_ids.shape[1] > 1:
+            model_kwargs["position_ids"] = position_ids[:, -1:] + 1
+        else:
+            model_kwargs["position_ids"] = position_ids + 1
+        
+        # NOTE: token_type_ids is not used by llama so we don't care about this one for now
+        # update token_type_ids with last value
+        if "token_type_ids" in model_kwargs:
+            token_type_ids = model_kwargs["token_type_ids"]
+            model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
         
         return model_kwargs
