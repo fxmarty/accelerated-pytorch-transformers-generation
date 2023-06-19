@@ -184,12 +184,11 @@ class LlamaAttention(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.kv_proj = nn.Linear(self.hidden_size, 2 * self.num_heads * self.head_dim, bias=False, device="meta")
+        self.qkv_proj = nn.Linear(self.hidden_size, 3 * self.num_heads * self.head_dim, bias=False, device="meta")
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
-        self.register_buffer("min_allowed", torch.tensor(torch.finfo(self.q_proj.weight.dtype).min), persistent=False)
+        self.register_buffer("min_allowed", torch.tensor(torch.finfo(self.o_proj.weight.dtype).min), persistent=False)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -208,8 +207,11 @@ class LlamaAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_value_states = self.kv_proj(hidden_states).view(bsz, q_len, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        # query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_key_value_states = self.qkv_proj(hidden_states).view(bsz, q_len, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+
+        query_states = query_key_value_states[0]
+        key_value_states = query_key_value_states[1:]
 
         # key_value_states used only for dtype here
         cos, sin = self.rotary_emb(key_value_states, seq_len=valid_past_index + q_len)
