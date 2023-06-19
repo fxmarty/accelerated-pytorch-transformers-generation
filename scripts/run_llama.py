@@ -173,12 +173,14 @@ for batch_size in tqdm(BATCH_SIZES):
         for max_new_tokens in tqdm(NEW_TOKENS):
             cache_length = 1 * (prompt_length + max_new_tokens)
 
+            inp = {
+                "input_ids": torch.randint(low=1, high=10, size=(batch_size, prompt_length)).to("cuda"),
+                "attention_mask": torch.ones(batch_size, prompt_length, dtype=torch.int32).to("cuda")
+            }
+
             if batch_size > 1:
                 inp["input_ids"][0, :10] = tokenizer.pad_token_id
                 inp["attention_mask"][0, :10] = 0
-
-            inp = tokenizer(["This is ", "He was my father but also my"], return_tensors="pt", padding=True).to("cuda")
-            prompt_length = inp["input_ids"].shape[1]
 
             h = hashlib.new('sha256')
             h.update(str(inp).encode())
