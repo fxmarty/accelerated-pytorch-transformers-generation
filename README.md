@@ -20,7 +20,7 @@ batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash
 1,1000,200,1200,fp16,23.150,14776.09,0d6aa042
 ```
 
-Running this repo model (as of [67a933c](https://github.com/fxmarty/accelerated-pytorch-transformers-generation/commit/67a933cb02def42f1fe98cc57d5077b976f1f51f)) & generation:
+Running this repo model (as of [f2e5881](https://github.com/fxmarty/accelerated-pytorch-transformers-generation/commit/f2e5881e8cf6d0e89f35356ff745e8bb02cb7ebc)) & generation:
 
 ```
 python run_llama.py --model huggingface/llama-7b --preallocate yes
@@ -30,7 +30,7 @@ gives
 
 ```
 batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash
-1,1000,200,1200,fp16,27.377,14247.73,0d6aa042
+1,1000,200,1200,fp16,27.444,14247.79,0d6aa042
 ```
 
 The `hash` is used to "make sure" the implementation is on par with transformers
