@@ -163,7 +163,7 @@ else:
 
 
 if args.compile:
-    model.forward = torch.compile(model.forward)
+    model.forward = torch.compile(model.forward, mode="reduce-overhead", dynamic=True)
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
