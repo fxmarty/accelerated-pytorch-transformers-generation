@@ -57,18 +57,24 @@ def timing_cuda(
     cache_length: int,
     preallocate: bool,
 ):
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    warmup_start_event = torch.cuda.Event(enable_timing=True)
+    warmup_end_event = torch.cuda.Event(enable_timing=True)
 
     if preallocate:
         inputs["cache_length"] = cache_length
 
+    warmup_start_event.record()
     res = generate_method(
         **inputs,
         min_new_tokens=max_new_tokens,
         max_new_tokens=max_new_tokens,
     )
+    warmup_end_event.record()
+    torch.cuda.synchronize()
+    print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds")
 
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.empty_cache()
     torch.cuda.synchronize()

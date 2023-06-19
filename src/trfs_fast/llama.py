@@ -116,8 +116,8 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
             self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
         return (
-            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
-            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+            self.cos_cached.to(dtype=x.dtype),
+            self.sin_cached.to(dtype=x.dtype),
         )
 
 
@@ -131,8 +131,8 @@ def rotate_half(x):
 def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     # TODO: can we remove some squeeze/unsqueeze?
-    cos = cos.squeeze(0, 1)  # [seq_len, dim]
-    sin = sin.squeeze(0, 1)  # [seq_len, dim]
+    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
     cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
     sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -155,17 +155,6 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-def apply_rotary_pos_emb_bis(q, kv, cos, sin, position_ids):
-    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
-    cos = cos.squeeze(0, 1)  # [seq_len, dim]
-    sin = sin.squeeze(0, 1)  # [seq_len, dim]
-    # TODO: couldn't we avoid a squeeze/unsqueeze?
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    kv[0] = (kv[0] * cos) + (rotate_half(kv[0]) * sin)
-    return q_embed
 
 
 class LlamaAttention(nn.Module):
@@ -524,7 +513,7 @@ class LlamaModel(LlamaPreTrainedModel):
             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
-        
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         # embed positions
@@ -532,7 +521,7 @@ class LlamaModel(LlamaPreTrainedModel):
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
-        
+
         # As we use SDPA, we simply don't care about the attention mask in the batch size = 1 case
         if batch_size > 1:
             attention_mask = self._prepare_decoder_attention_mask(
@@ -631,7 +620,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
 
     def get_decoder(self):
         return self.model
-    
+
     def get_empty_kv_cache(self, batch_size: int, cache_length: int, dtype: torch.dtype, device: torch.device):
         past_key_values = [torch.empty(
                     2,
@@ -644,7 +633,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
                 )
             for _ in range(self.config.num_hidden_layers)]
         return past_key_values
-    
+
     def get_preallocated_attention_mask(self, attention_mask: torch.Tensor, batch_size: int, cache_length: int, device: torch.device, context_length: int):
         attention_mask_buffer = torch.ones(batch_size, cache_length, dtype=torch.int64, device=device)
         attention_mask_buffer[:, :context_length] = attention_mask
