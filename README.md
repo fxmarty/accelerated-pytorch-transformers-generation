@@ -14,13 +14,7 @@ Running transformers model & generation:
 python run_llama.py --model huggingface/llama-7b --preallocate no
 ```
 
-gives
-```
-batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash
-1,1000,200,1200,fp16,23.150,14776.09,0d6aa042
-```
-
-Running this repo model (as of [f2e5881](https://github.com/fxmarty/accelerated-pytorch-transformers-generation/commit/f2e5881e8cf6d0e89f35356ff745e8bb02cb7ebc)) & generation:
+and
 
 ```
 python run_llama.py --model huggingface/llama-7b --preallocate yes
@@ -28,10 +22,12 @@ python run_llama.py --model huggingface/llama-7b --preallocate yes
 
 gives
 
-```
-batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash
-1,1000,200,1200,fp16,27.444,14247.79,0d6aa042
-```
+|changes                                               |batch_size|prompt_length|new_tokens|cache_length|dtype|tok_per_s|max_mem_mb|hash    |
+|------------------------------------------------------|----------|-------------|----------|------------|-----|---------|----------|--------|
+|None                                                  |1         |1000         |200       |1200        |fp16 |23.150   |14776.09  |0d6aa042|
+|Preallocated KV cache + SDPA + shared key/value linear|1         |1000         |200       |1200        |fp16 |27.329   |14249.72  |0d6aa042|
+|above + preallocated attention_mask                   |1         |1000         |200       |1200        |fp16 |27.377   |14247.73  |0d6aa042|
+|above + shared query/key/value linear                 |1         |1000         |200       |1200        |fp16 |27.444   |14247.79  |0d6aa042|
 
 The `hash` is used to "make sure" the implementation is on par with transformers
 
