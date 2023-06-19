@@ -129,14 +129,14 @@ if preallocate:
 
         # replace back parameters and buffers that were untouched by the bettertransformer transform
         for path, param in model.state_dict().items():
-            if "k_proj" not in path and "v_proj" not in path and "min_allowed" not in path:
+            if "k_proj" not in path and "v_proj" not in path and "q_proj" not in path and "min_allowed" not in path:
                 recurse_setattr(model, path, copy.deepcopy(recurse_getattr(original_model, path)))
 
                 recurse_delattr(original_model, path)  # save mem
 
         # some buffers may be non-persistent, hence not in the state_dict (as token_type_ids for some models)
         for path, param in model.named_buffers():
-            if "k_proj" not in path and "v_proj" not in path and "min_allowed" not in path:
+            if "k_proj" not in path and "v_proj" not in path and "q_proj" not in path and "min_allowed" not in path:
                 if recurse_hasattr(original_model, path):
                     recurse_setattr(model, path, copy.deepcopy(recurse_getattr(original_model, path)))
 
@@ -145,12 +145,14 @@ if preallocate:
                 recurse_setattr(model, path, torch.tensor(torch.finfo(dtype).min, device=device))
 
         for name, module in model.named_parameters():
-            if "kv_proj" in name:
+            if "qkv_proj" in name:
+                base_root_query = ".".join(name.split(".")[:-2]) + ".q_proj.weight"
                 base_root_key = ".".join(name.split(".")[:-2]) + ".k_proj.weight"
                 base_root_value = ".".join(name.split(".")[:-2]) + ".v_proj.weight"
                 root = ".".join(name.split(".")[:-1]) + ".weight"
 
                 weight = torch.nn.Parameter(torch.cat([
+                    copy.deepcopy(recurse_getattr(original_model, base_root_query)),
                     copy.deepcopy(recurse_getattr(original_model, base_root_key)), copy.deepcopy(recurse_getattr(original_model, base_root_value))
                 ], dim=0))
 
