@@ -39,7 +39,13 @@ parser.add_argument(
     choices=["yes", "no"],
     required=True
 )
-
+parser.add_argument(
+    "--compile",
+    type=str,
+    help="",
+    choices=["yes", "no"],
+    required=True
+)
 
 def timing_cuda(
     tokenizer,
@@ -113,7 +119,7 @@ device = torch.device("cuda")
 tokenizer = AutoTokenizer.from_pretrained(args.model)
 tokenizer.pad_token = tokenizer.eos_token
 
-header = "batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash"
+header = "batch_size,compile,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash"
 stats = {}
 
 if args.preallocate == "yes":
@@ -166,6 +172,9 @@ else:
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
 
+if args.compile == "yes":
+    model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
@@ -214,5 +223,15 @@ for batch_size in tqdm(BATCH_SIZES):
 print(header)
 for key, value in stats.items():
     batch_size, prompt_length, new_tokens = key
-    print(",".join([str(batch_size), str(prompt_length), str(new_tokens), str(value["cache_length"]), args.dtype, f"{value['tok_per_s']:.3f}", f"{value['max_mem']:.2f}", value["hash"]]))
+    print(",".join([
+        str(batch_size),
+        args.compile,
+        str(prompt_length),
+        str(new_tokens),
+        str(value["cache_length"]),
+        args.dtype,
+        f"{value['tok_per_s']:.3f}",
+        f"{value['max_mem']:.2f}",
+        value["hash"]])
+    )
 
