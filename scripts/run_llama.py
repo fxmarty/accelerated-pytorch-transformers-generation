@@ -24,20 +24,23 @@ parser.add_argument(
     "--model",
     type=str,
     default="huggingface/llama-7b",
-    help="",
+    help="Name of the weights on the Hub",
 )
 parser.add_argument(
     "--dtype",
     type=str,
     default="fp16",
-    help="",
+    help="Type of the weights that will be used at test time",
 )
 parser.add_argument(
     "--preallocate",
-    type=str,
-    help="",
-    choices=["yes", "no"],
-    required=True
+    action='store_true',
+    help="[TRIGGERS NEW CODE PATH] Whether to preallocate internal model tensors",
+)
+parser.add_argument(
+    "--compile",
+    action='store_true',
+    help="Whether to compile the model forward pass with torch.compile",
 )
 
 
@@ -57,38 +60,37 @@ def timing_cuda(
     if preallocate:
         inputs["cache_length"] = cache_length
 
-    with torch.inference_mode():
+    res = generate_method(
+        **inputs,
+        min_new_tokens=max_new_tokens,
+        max_new_tokens=max_new_tokens,
+    )
+
+    torch.cuda.reset_peak_memory_stats(device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+    """
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
+    ):
+    """
+    start_event.record()
+
+    for _ in tqdm(range(num_runs)):
         res = generate_method(
             **inputs,
             min_new_tokens=max_new_tokens,
             max_new_tokens=max_new_tokens,
         )
 
-        torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-        """
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
-        ):
-        """
-        start_event.record()
-
-        for _ in tqdm(range(num_runs)):
-            res = generate_method(
-                **inputs,
-                min_new_tokens=max_new_tokens,
-                max_new_tokens=max_new_tokens,
-            )
-
-        end_event.record()
-        torch.cuda.synchronize()
-        max_memory = torch.cuda.max_memory_allocated(device)
+    end_event.record()
+    torch.cuda.synchronize()
+    max_memory = torch.cuda.max_memory_allocated(device)
 
     h = hashlib.new('sha256')
     h.update(str(tokenizer.batch_decode(res)).encode())
@@ -116,12 +118,8 @@ tokenizer.pad_token = tokenizer.eos_token
 header = "batch_size,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash"
 stats = {}
 
-if args.preallocate == "yes":
-    preallocate = True
-else:
-    preallocate = False
 
-if preallocate:
+if args.preallocate:
     with device:
         original_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
     with torch.device("meta"):
@@ -163,6 +161,10 @@ else:
     with device:
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
 
+
+if args.compile:
+    model.forward = torch.compile(model.forward)
+
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
 
@@ -187,9 +189,9 @@ for batch_size in tqdm(BATCH_SIZES):
             h = hashlib.new('sha256')
             h.update(str(inp).encode())
             print("\nInput hash:", h.hexdigest()[:8])
-            print("Cache preallocation:", preallocate)
+            print("Cache preallocation:", args.preallocate)
 
-            generate_method = model.generate_minimal if preallocate else model.generate
+            generate_method = model.generate if not args.preallocate else model.generate_minimal
             time_per_generation, max_memory, sha_hash = timing_cuda(
                 tokenizer=tokenizer,
                 num_runs=3,
@@ -198,7 +200,7 @@ for batch_size in tqdm(BATCH_SIZES):
                 max_new_tokens=max_new_tokens,
                 cache_length=cache_length,
                 generate_method=generate_method,
-                preallocate=preallocate,
+                preallocate=args.preallocate,
             )
 
             tok_per_s = max_new_tokens / time_per_generation
@@ -215,4 +217,3 @@ print(header)
 for key, value in stats.items():
     batch_size, prompt_length, new_tokens = key
     print(",".join([str(batch_size), str(prompt_length), str(new_tokens), str(value["cache_length"]), args.dtype, f"{value['tok_per_s']:.3f}", f"{value['max_mem']:.2f}", value["hash"]]))
-
