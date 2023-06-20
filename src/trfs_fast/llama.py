@@ -131,6 +131,7 @@ def rotate_half(x):
 def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     # TODO: can we remove some squeeze/unsqueeze?
+    # TODO: replace by squeeze(0, 1) once https://github.com/pytorch/pytorch/issues/103875 is fixed
     cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
     sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
     cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
