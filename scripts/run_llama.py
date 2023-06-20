@@ -15,8 +15,9 @@ from trfs_fast.llama import LlamaForCausalLM
 from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
 
-# Debugging torch.compile
-os.environ["TORCHDYNAMO_REPORT_GUARD_FAILURES"] = "1"
+BATCH_SIZES = [1]
+PROMPT_LENGTHS = [1000]
+NEW_TOKENS = [200]
 
 parser = argparse.ArgumentParser()
 
@@ -41,7 +42,7 @@ parser.add_argument(
 parser.add_argument(
     "--compile",
     type=str,
-    choices=["no", "static", "dynamic"],
+    choices=["no", "static", "dynamic", "fullgraph"],
     default="no",
     help="If (and how) to compile the model forward pass with torch.compile",
 )
@@ -173,14 +174,11 @@ else:
 
 if args.compile != "no":
     dynamic = args.compile == "dynamic"
-    model.forward = torch.compile(model.forward, mode="reduce-overhead", dynamic=dynamic)
+    fullgraph = args.compile == "fullgraph"
+    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=fullgraph, dynamic=dynamic)
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
-
-BATCH_SIZES = [1]
-PROMPT_LENGTHS = [1000]
-NEW_TOKENS = [200]
 
 for batch_size in tqdm(BATCH_SIZES):
     for prompt_length in tqdm(PROMPT_LENGTHS):
