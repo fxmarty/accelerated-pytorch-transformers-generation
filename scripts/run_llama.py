@@ -1,21 +1,25 @@
-from tqdm import tqdm
-
-import torch
-
+import argparse
+import copy
+import hashlib
+import os
 from typing import Tuple, Dict
 
-import hashlib
+from tqdm import tqdm
+import torch
+from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
+
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from trfs_fast.llama import LlamaForCausalLM
-from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
-
 from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
-import argparse
-import copy
 
+BATCH_SIZES = [1]
+PROMPT_LENGTHS = [1000]
+NEW_TOKENS = [200]
+WARMUP_RUNS = 2
+NUM_RUNS = 5
 
 parser = argparse.ArgumentParser()
 
@@ -24,28 +28,27 @@ parser.add_argument(
     "--model",
     type=str,
     default="huggingface/llama-7b",
-    help="",
+    help="Name of the weights on the Hub",
 )
 parser.add_argument(
     "--dtype",
     type=str,
     default="fp16",
-    help="",
+    help="Type of the weights that will be used at test time",
 )
 parser.add_argument(
     "--preallocate",
-    type=str,
-    help="",
-    choices=["yes", "no"],
-    required=True
+    action='store_true',
+    help="[TRIGGERS NEW CODE PATH] Whether to preallocate internal model tensors",
 )
 parser.add_argument(
     "--compile",
     type=str,
-    help="",
-    choices=["yes", "no"],
-    required=True
+    choices=["no", "static", "dynamic", "fullgraph"],
+    default="no",
+    help="If (and how) to compile the model forward pass with torch.compile",
 )
+
 
 def timing_cuda(
     tokenizer,
@@ -57,44 +60,50 @@ def timing_cuda(
     cache_length: int,
     preallocate: bool,
 ):
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    warmup_start_event = torch.cuda.Event(enable_timing=True)
+    warmup_end_event = torch.cuda.Event(enable_timing=True)
 
     if preallocate:
         inputs["cache_length"] = cache_length
 
-    with torch.no_grad():
+    warmup_start_event.record()
+    for _ in tqdm(range(WARMUP_RUNS), desc="Warming up"):
+        res = generate_method(
+            **inputs,
+            min_new_tokens=max_new_tokens,
+            max_new_tokens=max_new_tokens,
+        )
+    warmup_end_event.record()
+    torch.cuda.synchronize()
+    print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds ({WARMUP_RUNS} generate calls)")
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    torch.cuda.reset_peak_memory_stats(device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+    """
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
+    ):
+    """
+    start_event.record()
+
+    for _ in tqdm(range(num_runs), desc="Measuring generate"):
         res = generate_method(
             **inputs,
             min_new_tokens=max_new_tokens,
             max_new_tokens=max_new_tokens,
         )
 
-        torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-        """
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
-        ):
-        """
-        start_event.record()
-
-        for _ in tqdm(range(num_runs)):
-            res = generate_method(
-                **inputs,
-                min_new_tokens=max_new_tokens,
-                max_new_tokens=max_new_tokens,
-            )
-
-        end_event.record()
-        torch.cuda.synchronize()
-        max_memory = torch.cuda.max_memory_allocated(device)
+    end_event.record()
+    torch.cuda.synchronize()
+    max_memory = torch.cuda.max_memory_allocated(device)
 
     h = hashlib.new('sha256')
     h.update(str(tokenizer.batch_decode(res)).encode())
@@ -122,12 +131,8 @@ tokenizer.pad_token = tokenizer.eos_token
 header = "batch_size,compile,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash"
 stats = {}
 
-if args.preallocate == "yes":
-    preallocate = True
-else:
-    preallocate = False
 
-if preallocate:
+if args.preallocate:
     with device:
         original_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
     with torch.device("meta"):
@@ -159,7 +164,8 @@ if preallocate:
 
                 weight = torch.nn.Parameter(torch.cat([
                     copy.deepcopy(recurse_getattr(original_model, base_root_query)),
-                    copy.deepcopy(recurse_getattr(original_model, base_root_key)), copy.deepcopy(recurse_getattr(original_model, base_root_value))
+                    copy.deepcopy(recurse_getattr(original_model, base_root_key)),
+                    copy.deepcopy(recurse_getattr(original_model, base_root_value))
                 ], dim=0))
 
                 recurse_setattr(model, name, weight)
@@ -169,17 +175,14 @@ else:
     with device:
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
 
+
+if args.compile != "no":
+    dynamic = args.compile == "dynamic"
+    fullgraph = args.compile == "fullgraph"
+    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=fullgraph, dynamic=dynamic)
+
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
-
-model = model.eval()
-if args.compile == "yes":
-    print("Compiling model.")
-    model.forward = torch.compile(model.forward, dynamic=True)
-
-BATCH_SIZES = [1]
-PROMPT_LENGTHS = [1000]
-NEW_TOKENS = [200]
 
 for batch_size in tqdm(BATCH_SIZES):
     for prompt_length in tqdm(PROMPT_LENGTHS):
@@ -198,18 +201,18 @@ for batch_size in tqdm(BATCH_SIZES):
             h = hashlib.new('sha256')
             h.update(str(inp).encode())
             print("\nInput hash:", h.hexdigest()[:8])
-            print("Cache preallocation:", preallocate)
+            print("Cache preallocation:", args.preallocate)
 
-            generate_method = model.generate_minimal if preallocate else model.generate
+            generate_method = model.generate if not args.preallocate else model.generate_minimal
             time_per_generation, max_memory, sha_hash = timing_cuda(
                 tokenizer=tokenizer,
-                num_runs=3,
+                num_runs=NUM_RUNS,
                 inputs=inp,
                 device=device,
                 max_new_tokens=max_new_tokens,
                 cache_length=cache_length,
                 generate_method=generate_method,
-                preallocate=preallocate,
+                preallocate=args.preallocate,
             )
 
             tok_per_s = max_new_tokens / time_per_generation
@@ -236,4 +239,3 @@ for key, value in stats.items():
         f"{value['max_mem']:.2f}",
         value["hash"]])
     )
-
