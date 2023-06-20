@@ -18,6 +18,7 @@ from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, r
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
+NUM_RUNS = 50
 
 parser = argparse.ArgumentParser()
 
@@ -167,7 +168,8 @@ if args.preallocate:
 
                 weight = torch.nn.Parameter(torch.cat([
                     copy.deepcopy(recurse_getattr(original_model, base_root_query)),
-                    copy.deepcopy(recurse_getattr(original_model, base_root_key)), copy.deepcopy(recurse_getattr(original_model, base_root_value))
+                    copy.deepcopy(recurse_getattr(original_model, base_root_key)),
+                    copy.deepcopy(recurse_getattr(original_model, base_root_value))
                 ], dim=0))
 
                 recurse_setattr(model, name, weight)
@@ -208,7 +210,7 @@ for batch_size in tqdm(BATCH_SIZES):
             generate_method = model.generate if not args.preallocate else model.generate_minimal
             time_per_generation, max_memory, sha_hash = timing_cuda(
                 tokenizer=tokenizer,
-                num_runs=3,
+                num_runs=NUM_RUNS,
                 inputs=inp,
                 device=device,
                 max_new_tokens=max_new_tokens,
