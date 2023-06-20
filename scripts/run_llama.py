@@ -173,7 +173,8 @@ if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
 
 if args.compile == "yes":
-    model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    print("Compiling model.")
+    model.forward = torch.compile(model.forward, dynamic=True)
 
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
