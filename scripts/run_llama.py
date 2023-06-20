@@ -63,7 +63,7 @@ def timing_cuda(
     if preallocate:
         inputs["cache_length"] = cache_length
 
-    with torch.inference_mode():
+    with torch.no_grad():
         res = generate_method(
             **inputs,
             min_new_tokens=max_new_tokens,
@@ -172,6 +172,7 @@ else:
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
 
+model = model.eval()
 if args.compile == "yes":
     print("Compiling model.")
     model.forward = torch.compile(model.forward, dynamic=True)
