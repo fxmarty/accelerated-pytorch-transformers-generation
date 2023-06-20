@@ -116,7 +116,7 @@ class GenerationPrefill:
         batch_size, context_length = input_ids.shape
         cache_length = cache_length if cache_length is not None else max_new_tokens
 
-        model_kwargs["valid_past_index"] = 0
+        model_kwargs["valid_past_index"] = torch.tensor(0).to(input_ids.device)
         model_kwargs["past_key_values"] = self.get_empty_kv_cache(batch_size=batch_size, cache_length=cache_length, device=input_ids.device, dtype=self.dtype)
         model_kwargs["attention_mask"] = self.get_preallocated_attention_mask(attention_mask=model_kwargs["attention_mask"], batch_size=batch_size, cache_length=cache_length, device=input_ids.device, context_length=context_length)
 
@@ -180,7 +180,7 @@ class GenerationPrefill:
 
         # keep track of which sequences are already finished
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
-        
+
         counter = 0
         while True:
             # prepare model inputs
@@ -238,7 +238,7 @@ class GenerationPrefill:
         model_inputs: Dict[str, Any]
     ) -> Dict[str, Any]:
         model_kwargs["valid_past_index"] += outputs.logits.shape[1]
-        
+
         if getattr(outputs, "state", None) is not None:
             model_kwargs["state"] = outputs.state
 
@@ -255,11 +255,11 @@ class GenerationPrefill:
             model_kwargs["position_ids"] = position_ids[:, -1:] + 1
         else:
             model_kwargs["position_ids"] = position_ids + 1
-        
+
         # NOTE: token_type_ids is not used by llama so we don't care about this one for now
         # update token_type_ids with last value
         if "token_type_ids" in model_kwargs:
             token_type_ids = model_kwargs["token_type_ids"]
             model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
-        
+
         return model_kwargs
