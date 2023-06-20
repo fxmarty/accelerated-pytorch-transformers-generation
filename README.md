@@ -8,16 +8,16 @@ pip install -e .
 
 Below on AMD EPYC 7R32 + A10G (g5.2xlarge).
 
-Running transformers model & generation:
+Running default transformers model & generation:
 
 ```
-python run_llama.py --model huggingface/llama-7b --preallocate no
+python run_llama.py --model huggingface/llama-7b
 ```
 
-and
+Adding flags will change the behavior of text generation (use --help for the available flags):
 
 ```
-python run_llama.py --model huggingface/llama-7b --preallocate yes
+python run_llama.py --model huggingface/llama-7b --preallocate --compile static
 ```
 
 gives

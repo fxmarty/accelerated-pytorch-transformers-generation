@@ -107,14 +107,17 @@ class LlamaRotaryEmbedding(torch.nn.Module):
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
-        if seq_len > self.max_seq_len_cached:
-            self.max_seq_len_cached = seq_len
-            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            # Different from paper, but it uses a different permutation in order to obtain the same calculation
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
-            self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
+
+        # raises control flow exception
+        # if seq_len > self.max_seq_len_cached:
+        #     self.max_seq_len_cached = seq_len
+        #     t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+        #     freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        #     # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        #     emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+        #     self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
+        #     self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
+
         return (
             self.cos_cached.to(dtype=x.dtype),
             self.sin_cached.to(dtype=x.dtype),
@@ -190,7 +193,7 @@ class LlamaAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
-        valid_past_index: int = 0,
+        valid_past_index: torch.Tensor = torch.Tensor(0),
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions is True:
             raise ValueError("output_attentions=True can not be supported with BetterTransformer.")
@@ -207,14 +210,12 @@ class LlamaAttention(nn.Module):
         cos, sin = self.rotary_emb(key_value_states, seq_len=valid_past_index + q_len)
         query_states = apply_rotary_pos_emb_opt(query_states, key_value_states[0], cos, sin, position_ids)
 
-        if valid_past_index > 0:
-            upper = valid_past_index + 1
-            past_key_value[..., valid_past_index:upper, :] = key_value_states
-            key_states, value_states = past_key_value[..., :upper, :]
-        else:
-            past_key_value[..., :q_len, :] = key_value_states
-            key_states, value_states = key_value_states
-
+        # slice end is equivalent to "if valid_past_index > 0: = valid_past_index + 1; else: = q_len"
+        past_kv_slice_start = valid_past_index
+        past_kv_slice_end = torch.eq(valid_past_index, 0).int() * q_len + torch.ne(valid_past_index, 0).int() * (valid_past_index + 1)
+        past_state_slice_end = torch.eq(valid_past_index, 0).int() * key_value_states.shape[-2] + torch.ne(valid_past_index, 0).int() * (past_kv_slice_end)
+        past_key_value[..., past_kv_slice_start:past_kv_slice_end, :] = key_value_states
+        key_states, value_states = past_key_value[..., :past_state_slice_end, :]
 
         if bsz == 1 or self.training:
             # BEWARE: at this stage, attention_mask is not the same as in transformers llama
@@ -263,7 +264,7 @@ class LlamaDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
-        valid_past_index: int = 0,
+        valid_past_index: torch.Tensor = torch.Tensor(0),
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -483,7 +484,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: int = 0,
+        valid_past_index: torch.Tensor = torch.Tensor(0),
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -502,8 +503,6 @@ class LlamaModel(LlamaPreTrainedModel):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         seq_length_with_past = seq_length
-        past_key_values_length = 0
-
         past_key_values_length = valid_past_index
 
         if position_ids is None:
@@ -654,7 +653,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: int = 0,
+        valid_past_index: torch.Tensor = torch.Tensor(0),
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -732,7 +731,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
-        valid_past_index = kwargs.get("valid_past_index", 0)
+        valid_past_index = kwargs.get("valid_past_index", torch.Tensor(0))
 
         if valid_past_index > 0:
             input_ids = input_ids[:, -1:]
