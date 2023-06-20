@@ -18,7 +18,8 @@ from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, r
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
-NUM_RUNS = 50
+WARMUP_RUNS = 2
+NUM_RUNS = 5
 
 parser = argparse.ArgumentParser()
 
@@ -47,13 +48,7 @@ parser.add_argument(
     default="no",
     help="If (and how) to compile the model forward pass with torch.compile",
 )
-parser.add_argument(
-    "--compile",
-    type=str,
-    help="",
-    choices=["yes", "no"],
-    required=True
-)
+
 
 def timing_cuda(
     tokenizer,
@@ -72,14 +67,15 @@ def timing_cuda(
         inputs["cache_length"] = cache_length
 
     warmup_start_event.record()
-    res = generate_method(
-        **inputs,
-        min_new_tokens=max_new_tokens,
-        max_new_tokens=max_new_tokens,
-    )
+    for _ in tqdm(range(WARMUP_RUNS), desc="Warming up"):
+        res = generate_method(
+            **inputs,
+            min_new_tokens=max_new_tokens,
+            max_new_tokens=max_new_tokens,
+        )
     warmup_end_event.record()
     torch.cuda.synchronize()
-    print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds")
+    print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds ({WARMUP_RUNS} generate calls)")
 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
@@ -98,7 +94,7 @@ def timing_cuda(
     """
     start_event.record()
 
-    for _ in tqdm(range(num_runs)):
+    for _ in tqdm(range(num_runs), desc="Measuring generate"):
         res = generate_method(
             **inputs,
             min_new_tokens=max_new_tokens,
@@ -243,4 +239,3 @@ for key, value in stats.items():
         f"{value['max_mem']:.2f}",
         value["hash"]])
     )
-
