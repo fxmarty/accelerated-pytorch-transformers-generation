@@ -17,19 +17,21 @@ python run_llama.py --model huggingface/llama-7b
 Adding flags will change the behavior of text generation (use --help for the available flags):
 
 ```
+python run_llama.py --model huggingface/llama-7b --preallocate --compile no
 python run_llama.py --model huggingface/llama-7b --preallocate --compile static
 ```
 
-gives
+gives, with `batch_size=1`, `prompt_length=1000`, `new_tokens=200`, `cache_length=1200`, `dtype=fp16`:
 
-|changes                                               |batch_size|prompt_length|new_tokens|cache_length|dtype|tok_per_s|max_mem_mb|hash    |
-|------------------------------------------------------|----------|-------------|----------|------------|-----|---------|----------|--------|
-|None                                                  |1         |1000         |200       |1200        |fp16 |23.150   |14776.09  |0d6aa042|
-|Preallocated KV cache + SDPA + shared key/value linear|1         |1000         |200       |1200        |fp16 |27.329   |14249.72  |0d6aa042|
-|above + preallocated attention_mask                   |1         |1000         |200       |1200        |fp16 |27.377   |14247.73  |0d6aa042|
-|above + shared query/key/value linear                 |1         |1000         |200       |1200        |fp16 |27.444   |14247.79  |0d6aa042|
+| changes                                                     | compile | tok_per_s | max_mem_mb | hash     | commit                                   |
+|-------------------------------------------------------------|---------|-----------|------------|----------|------------------------------------------|
+| None                                                        | no      | 23.150    | 14776.09   | 0d6aa042 | hhehe                                    |
+| Preallocated KV cache + SDPA + shared key/value linear      | no      | 27.329    | 14249.72   | 0d6aa042 | 300840e4a6531d44d7129d341b6a24cf63947807 |
+| above + preallocated attention_mask                         | no      | 27.377    | 14247.73   | 0d6aa042 | 67a933cb02def42f1fe98cc57d5077b976f1f51f |
+| above + shared query/key/value linear                       | no      | 27.444    | 14247.79   | 0d6aa042 | f2e5881e8cf6d0e89f35356ff745e8bb02cb7ebc |
+| above + `valid_past_index` as tensor + removed controlflows | no      | 27.166    | 14248.19   | 0d6aa042 | 83ca672ec3c0f2c93e70da6d79bafdeb7c2f7e90 |
 
-The `hash` is used to "make sure" the implementation is on par with transformers
+The `hash` is used to "make sure" the implementation is on par with transformers.
 
 The default
 
