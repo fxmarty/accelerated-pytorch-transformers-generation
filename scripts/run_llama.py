@@ -66,44 +66,45 @@ def timing_cuda(
     if preallocate:
         inputs["cache_length"] = cache_length
 
-    warmup_start_event.record()
-    for _ in tqdm(range(WARMUP_RUNS), desc="Warming up"):
-        res = generate_method(
-            **inputs,
-            min_new_tokens=max_new_tokens,
-            max_new_tokens=max_new_tokens,
-        )
-    warmup_end_event.record()
-    torch.cuda.synchronize()
-    print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds ({WARMUP_RUNS} generate calls)")
+    with torch.no_grad():
+        warmup_start_event.record()
+        for _ in tqdm(range(WARMUP_RUNS), desc="Warming up"):
+            res = generate_method(
+                **inputs,
+                min_new_tokens=max_new_tokens,
+                max_new_tokens=max_new_tokens,
+            )
+        warmup_end_event.record()
+        torch.cuda.synchronize()
+        print(f"Warmup/compilation time: {warmup_start_event.elapsed_time(warmup_end_event) * 1.0e-3:.2f} seconds ({WARMUP_RUNS} generate calls)")
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    torch.cuda.reset_peak_memory_stats(device)
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
-    """
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-        on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
-    ):
-    """
-    start_event.record()
+        """
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
+        ):
+        """
+        start_event.record()
 
-    for _ in tqdm(range(num_runs), desc="Measuring generate"):
-        res = generate_method(
-            **inputs,
-            min_new_tokens=max_new_tokens,
-            max_new_tokens=max_new_tokens,
-        )
+        for _ in tqdm(range(num_runs), desc="Measuring generate"):
+            res = generate_method(
+                **inputs,
+                min_new_tokens=max_new_tokens,
+                max_new_tokens=max_new_tokens,
+            )
 
-    end_event.record()
-    torch.cuda.synchronize()
-    max_memory = torch.cuda.max_memory_allocated(device)
+        end_event.record()
+        torch.cuda.synchronize()
+        max_memory = torch.cuda.max_memory_allocated(device)
 
     h = hashlib.new('sha256')
     h.update(str(tokenizer.batch_decode(res)).encode())

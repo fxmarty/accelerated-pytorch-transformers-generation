@@ -193,7 +193,7 @@ class LlamaAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
-        valid_past_index: torch.Tensor = torch.Tensor(0),
+        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions is True:
             raise ValueError("output_attentions=True can not be supported with BetterTransformer.")
@@ -264,7 +264,7 @@ class LlamaDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
-        valid_past_index: torch.Tensor = torch.Tensor(0),
+        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -484,7 +484,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: torch.Tensor = torch.Tensor(0),
+        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -653,7 +653,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: torch.Tensor = torch.Tensor(0),
+        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -731,7 +731,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
-        valid_past_index = kwargs.get("valid_past_index", torch.Tensor(0))
+        valid_past_index = kwargs.get("valid_past_index", torch.tensor(0, dtype=torch.int64))
 
         if valid_past_index > 0:
             input_ids = input_ids[:, -1:]
