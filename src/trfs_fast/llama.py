@@ -214,18 +214,33 @@ class LlamaAttention(nn.Module):
         past_kv_slice_start = valid_past_index
         past_kv_slice_end = torch.eq(valid_past_index, 0).int() * q_len + torch.ne(valid_past_index, 0).int() * (valid_past_index + 1)
         past_state_slice_end = torch.eq(valid_past_index, 0).int() * key_value_states.shape[-2] + torch.ne(valid_past_index, 0).int() * (past_kv_slice_end)
-        past_key_value[..., past_kv_slice_start:past_kv_slice_end, :] = key_value_states
-        key_states, value_states = past_key_value[..., :past_state_slice_end, :]
+
+        # rewrites to avoid dynamic slicing
+        # past_key_value[..., past_kv_slice_start:past_kv_slice_end, :] = key_value_states
+        # key_states, value_states = past_key_value[..., :past_state_slice_end, :]
+
+        # pads 2nd to last dim of `key_value_states` with zeros to match the shape of `past_key_value`
+        past_key_value += torch.nn.functional.pad(
+            key_value_states,
+            pad=(0, 0, past_kv_slice_start, past_key_value.shape[-2] - past_kv_slice_end),
+            mode='constant',
+            value=0
+        )
+        key_states, value_states = past_key_value
+
 
         if bsz == 1 or self.training:
             # BEWARE: at this stage, attention_mask is not the same as in transformers llama
             if query_states.shape[2] > 1:
+                # slicing needs to be done here
+                key_states = key_states[..., :past_state_slice_end, :]
+                value_states = value_states[..., :past_state_slice_end, :]
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query_states, key_states, value_states, attn_mask=None, dropout_p=0.0, is_causal=True
                 )
             else:
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states, key_states, value_states, attn_mask=None, dropout_p=0.0, is_causal=False
+                    query_states, key_states, value_states, attn_mask=attention_mask.bool(), dropout_p=0.0, is_causal=False
                 )
         else:
             # This line is necessary for numerical equivalence, although I'm not sure it is useful in any way.
@@ -622,20 +637,22 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
         return self.model
 
     def get_empty_kv_cache(self, batch_size: int, cache_length: int, dtype: torch.dtype, device: torch.device):
-        past_key_values = [torch.empty(
-                    2,
-                    batch_size,
-                    self.config.num_attention_heads,
-                    cache_length,
-                    self.config.hidden_size // self.config.num_attention_heads,  # head dimension
-                    dtype=dtype,
-                    device=device
-                )
-            for _ in range(self.config.num_hidden_layers)]
+        past_key_values = [
+            torch.zeros(
+                2,
+                batch_size,
+                self.config.num_attention_heads,
+                cache_length,
+                self.config.hidden_size // self.config.num_attention_heads,  # head dimension
+                dtype=dtype,
+                device=device
+            )
+            for _ in range(self.config.num_hidden_layers)
+        ]
         return past_key_values
 
     def get_preallocated_attention_mask(self, attention_mask: torch.Tensor, batch_size: int, cache_length: int, device: torch.device, context_length: int):
-        attention_mask_buffer = torch.ones(batch_size, cache_length, dtype=torch.int64, device=device)
+        attention_mask_buffer = torch.zeros(batch_size, cache_length, dtype=torch.int64, device=device)
         attention_mask_buffer[:, :context_length] = attention_mask
 
         return attention_mask_buffer
@@ -734,7 +751,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
         valid_past_index = kwargs.get("valid_past_index", torch.tensor(0, dtype=torch.int64))
 
         if valid_past_index > 0:
-            input_ids = input_ids[:, -1:]
+            # input_ids = input_ids[:, -1:]
+            input_ids = torch.as_strided(input_ids[:, -1:], (1, 1), (1, 1))
 
         position_ids = kwargs.get("position_ids", None)
         # create position_ids

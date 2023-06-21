@@ -208,9 +208,6 @@ class GenerationPrefill:
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
             if streamer is not None:
                 streamer.put(next_tokens.cpu())
-            model_kwargs = self.__update_model_kwargs_for_generation(
-                outputs, model_kwargs, model_inputs
-            )
 
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
@@ -222,9 +219,12 @@ class GenerationPrefill:
                 if unfinished_sequences.max() == 0 and counter >= min_new_tokens:
                     break
 
-            # stop if we exceed the maximum length
+            # stop if we exceed the maximum length, update kwargs if not
             if counter >= max_new_tokens:
                 break
+            model_kwargs = self.__update_model_kwargs_for_generation(
+                outputs, model_kwargs, model_inputs
+            )
 
         if streamer is not None:
             streamer.end()
@@ -241,6 +241,8 @@ class GenerationPrefill:
 
         if getattr(outputs, "state", None) is not None:
             model_kwargs["state"] = outputs.state
+
+        model_kwargs["attention_mask"][:, model_inputs["valid_past_index"]] = 1.0
 
         # update attention mask
         """
