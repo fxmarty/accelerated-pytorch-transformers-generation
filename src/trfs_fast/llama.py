@@ -119,8 +119,8 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         #     self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
 
         return (
-            self.cos_cached.to(dtype=x.dtype),
-            self.sin_cached.to(dtype=x.dtype),
+            self.cos_cached[0, 0, :, :].to(dtype=x.dtype),
+            self.sin_cached[0, 0, :, :].to(dtype=x.dtype),
         )
 
 
@@ -135,8 +135,8 @@ def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     # TODO: can we remove some squeeze/unsqueeze?
     # TODO: replace by squeeze(0, 1) once https://github.com/pytorch/pytorch/issues/103875 is fixed
-    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+    # cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    # sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
     cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
     sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
     q_embed = (q * cos) + (rotate_half(q) * sin)

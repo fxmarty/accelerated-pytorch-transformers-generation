@@ -18,8 +18,10 @@ from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, r
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
+# NEW_TOKENS = [10]
 WARMUP_RUNS = 2
 NUM_RUNS = 5
+# NUM_RUNS = 1
 
 parser = argparse.ArgumentParser()
 
@@ -84,15 +86,13 @@ def timing_cuda(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-        """
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
-        ):
-        """
+        # with profile(
+        #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        #     record_shapes=True,
+        #     profile_memory=True,
+        #     with_stack=True,
+        #     on_trace_ready=tensorboard_trace_handler("/home/joao/tb_logs/preallocate"),
+        # ):
         start_event.record()
 
         for _ in tqdm(range(num_runs), desc="Measuring generate"):
@@ -103,6 +103,7 @@ def timing_cuda(
             )
 
         end_event.record()
+
         torch.cuda.synchronize()
         max_memory = torch.cuda.max_memory_allocated(device)
 
@@ -112,6 +113,7 @@ def timing_cuda(
     sha_hash = h.hexdigest()
 
     return (start_event.elapsed_time(end_event) * 1.0e-3) / num_runs, max_memory * 1e-6, sha_hash
+
 
 args = parser.parse_args()
 
@@ -151,7 +153,6 @@ if args.preallocate:
             if "k_proj" not in path and "v_proj" not in path and "q_proj" not in path and "min_allowed" not in path:
                 if recurse_hasattr(original_model, path):
                     recurse_setattr(model, path, copy.deepcopy(recurse_getattr(original_model, path)))
-
                     recurse_delattr(original_model, path)  # save mem
             if "min_allowed" in path:
                 recurse_setattr(model, path, torch.tensor(torch.finfo(dtype).min, device=device))
