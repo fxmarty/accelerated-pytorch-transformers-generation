@@ -179,9 +179,10 @@ class GenerationPrefill:
         n_eos_tokens = eos_token_id_tensor.shape[0]
 
         # keep track of which sequences are already finished
-        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
+        unfinished_sequences = torch.ones((input_ids.shape[0], 1), dtype=torch.long, device=input_ids.device)
 
         counter = 0
+        result = input_ids
         while True:
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -196,7 +197,7 @@ class GenerationPrefill:
             counter += 1
 
             # argmax
-            next_tokens = torch.argmax(outputs.logits[:, -1, :], dim=-1)
+            next_tokens = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
@@ -204,14 +205,17 @@ class GenerationPrefill:
                     raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
+            input_ids = next_tokens
+
             # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+            result = torch.cat([result, next_tokens], dim=-1)
             if streamer is not None:
                 streamer.put(next_tokens.cpu())
             model_kwargs = self.__update_model_kwargs_for_generation(
                 outputs, model_kwargs, model_inputs
             )
 
+            # TODO: not sure this is correct anymore with the keepdim=True
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
                 unfinished_sequences = unfinished_sequences.mul(
@@ -229,7 +233,7 @@ class GenerationPrefill:
         if streamer is not None:
             streamer.end()
 
-        return input_ids
+        return result
 
     def __update_model_kwargs_for_generation(
         self,
