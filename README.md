@@ -21,6 +21,12 @@ python run_llama.py --model huggingface/llama-7b --preallocate --compile no
 python run_llama.py --model huggingface/llama-7b --preallocate --compile static
 ```
 
+You can profile a short run with `--profile`, with the TB logs being stored in `./tb_logs/`
+
+```
+python run_llama.py --model huggingface/llama-7b --preallocate --profile
+```
+
 gives, with `batch_size=1`, `prompt_length=1000`, `new_tokens=200`, `cache_length=1200`, `dtype=fp16`:
 
 | changes                                                     | compile | tok_per_s | max_mem_mb | hash     | commit                                   |
