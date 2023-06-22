@@ -126,9 +126,10 @@ class LlamaRotaryEmbedding(torch.nn.Module):
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+    x = torch.roll(x, shifts=x.shape[-1] // 2, dims=-1)
+    x[..., : x.shape[-1] // 2] *= -1
+    return x
+
 
 
 def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
