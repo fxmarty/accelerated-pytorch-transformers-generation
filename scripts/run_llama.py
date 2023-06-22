@@ -1,14 +1,13 @@
 import argparse
 import copy
+import contextlib
 import hashlib
-import os
-from typing import Tuple, Dict
+from typing import Dict
 
 from tqdm import tqdm
 import torch
-from torch.profiler import ProfilerActivity, profile, record_function, tensorboard_trace_handler
+from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
-import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from trfs_fast.llama import LlamaForCausalLM
@@ -20,6 +19,9 @@ PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
 WARMUP_RUNS = 2
 NUM_RUNS = 5
+
+PROFILE_NEW_TOKENS = 10
+PROFILE_NUM_RUNS = 1
 
 parser = argparse.ArgumentParser()
 
@@ -42,6 +44,11 @@ parser.add_argument(
     help="[TRIGGERS NEW CODE PATH] Whether to preallocate internal model tensors",
 )
 parser.add_argument(
+    "--profile",
+    action='store_true',
+    help="Does a storter run for profiling purposes",
+)
+parser.add_argument(
     "--compile",
     type=str,
     choices=["no", "static", "dynamic", "fullgraph"],
@@ -59,16 +66,22 @@ def timing_cuda(
     device: torch.device,
     cache_length: int,
     preallocate: bool,
+    do_profile: bool,
 ):
     warmup_start_event = torch.cuda.Event(enable_timing=True)
     warmup_end_event = torch.cuda.Event(enable_timing=True)
+
+    if do_profile:
+        num_runs = PROFILE_NUM_RUNS
+        max_new_tokens = PROFILE_NEW_TOKENS
 
     if preallocate:
         inputs["cache_length"] = cache_length
 
     with torch.no_grad():
+        print("Warming up...")
         warmup_start_event.record()
-        for _ in tqdm(range(WARMUP_RUNS), desc="Warming up"):
+        for _ in range(WARMUP_RUNS):
             res = generate_method(
                 **inputs,
                 min_new_tokens=max_new_tokens,
@@ -84,25 +97,31 @@ def timing_cuda(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-        """
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            on_trace_ready=tensorboard_trace_handler(f"./tb_logs/preallocate_True"),
-        ):
-        """
-        start_event.record()
-
-        for _ in tqdm(range(num_runs), desc="Measuring generate"):
-            res = generate_method(
-                **inputs,
-                min_new_tokens=max_new_tokens,
-                max_new_tokens=max_new_tokens,
+        if do_profile:
+            profile_dir = "./tb_logs"
+            print("Profiling and writing to", profile_dir)
+            cm = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+                on_trace_ready=tensorboard_trace_handler(dir_name=profile_dir),
             )
+        else:
+            cm = contextlib.nullcontext()
 
-        end_event.record()
+        with cm:
+            start_event.record()
+
+            for _ in tqdm(range(num_runs), desc="Measuring generate"):
+                res = generate_method(
+                    **inputs,
+                    min_new_tokens=max_new_tokens,
+                    max_new_tokens=max_new_tokens,
+                )
+
+            end_event.record()
+
         torch.cuda.synchronize()
         max_memory = torch.cuda.max_memory_allocated(device)
 
@@ -112,6 +131,7 @@ def timing_cuda(
     sha_hash = h.hexdigest()
 
     return (start_event.elapsed_time(end_event) * 1.0e-3) / num_runs, max_memory * 1e-6, sha_hash
+
 
 args = parser.parse_args()
 
@@ -214,6 +234,7 @@ for batch_size in tqdm(BATCH_SIZES):
                 cache_length=cache_length,
                 generate_method=generate_method,
                 preallocate=args.preallocate,
+                do_profile=args.profile,
             )
 
             tok_per_s = max_new_tokens / time_per_generation
