@@ -6,7 +6,7 @@ from typing import Dict
 
 from tqdm import tqdm
 import torch
-from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
+from torch.profiler import ProfilerActivity, profile, tensorboard_trace_handler
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -64,8 +64,6 @@ def timing_cuda(
     inputs: Dict,
     max_new_tokens: int,
     device: torch.device,
-    cache_length: int,
-    preallocate: bool,
     do_profile: bool,
 ):
     warmup_start_event = torch.cuda.Event(enable_timing=True)
@@ -74,9 +72,6 @@ def timing_cuda(
     if do_profile:
         num_runs = PROFILE_NUM_RUNS
         max_new_tokens = PROFILE_NEW_TOKENS
-
-    if preallocate:
-        inputs["cache_length"] = cache_length
 
     with torch.no_grad():
         print("Warming up...")
@@ -231,9 +226,7 @@ for batch_size in tqdm(BATCH_SIZES):
                 inputs=inp,
                 device=device,
                 max_new_tokens=max_new_tokens,
-                cache_length=cache_length,
                 generate_method=generate_method,
-                preallocate=args.preallocate,
                 do_profile=args.profile,
             )
 
