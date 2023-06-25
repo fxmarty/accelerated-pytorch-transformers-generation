@@ -214,7 +214,8 @@ class LlamaAttention(nn.Module):
         if past_key_value is None:
             past_key_value = key_value_states
         else:
-            past_key_value[..., -1:, :] = key_value_states
+            # past_key_value[..., -1:, :] = key_value_states -> causes a bug in the inductor, replaced by += and zero setting outside the generation loop
+            past_key_value[..., -1:, :] += key_value_states
         key_states, value_states = past_key_value
 
         # This line is necessary for numerical equivalence, although I'm not sure it is useful in any way.

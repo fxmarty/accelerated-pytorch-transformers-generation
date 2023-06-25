@@ -269,7 +269,7 @@ class GenerationPrefill:
             # past_key_values update: Move the cache appended on the last position to its permanent position
             for i in range(len(model_kwargs["past_key_values"])):
                 model_kwargs["past_key_values"][i][..., backfill_pos, :] = outputs.past_key_values[i][..., -1, :]
-
+                model_kwargs["past_key_values"][i][..., -1, :] *= 0  # see inductor bug mentioned in the attn layer
 
         # NOTE: token_type_ids is not used by llama so we don't care about this one for now
         # update token_type_ids with last value
