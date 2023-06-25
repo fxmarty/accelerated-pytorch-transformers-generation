@@ -6,6 +6,7 @@ from typing import Dict
 
 from tqdm import tqdm
 import torch
+
 from torch.profiler import ProfilerActivity, profile, tensorboard_trace_handler
 
 from transformers import AutoModelForCausalLM, AutoTokenizer

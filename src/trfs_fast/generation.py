@@ -262,11 +262,14 @@ class GenerationPrefill:
         else:
             # Position ids update: simply add one
             model_kwargs["position_ids"] += 1
-            # Attention mask update: add a one at `cur_len`, which corresponds to the newly added token
-            model_kwargs["attention_mask"][:, cur_len] = 1
+            # Attention mask update: add a one in the position to backfill (corresponding to the token that was just
+            # selected)
+            backfill_pos = cur_len - 2
+            model_kwargs["attention_mask"][:, backfill_pos] = 1
             # past_key_values update: Move the cache appended on the last position to its permanent position
             for i in range(len(model_kwargs["past_key_values"])):
-                model_kwargs["past_key_values"][i][..., cur_len, :] = outputs.past_key_values[i][..., -1, :]
+                model_kwargs["past_key_values"][i][..., backfill_pos, :] = outputs.past_key_values[i][..., -1, :]
+
 
         # NOTE: token_type_ids is not used by llama so we don't care about this one for now
         # update token_type_ids with last value
@@ -279,7 +282,7 @@ class GenerationPrefill:
 
 def get_empty_kv_cache(config, batch_size: int, max_length: int, dtype: torch.dtype, device: torch.device):
     past_key_values = [
-        torch.empty(
+        torch.zeros(
             2,
             batch_size,
             config.num_attention_heads,
