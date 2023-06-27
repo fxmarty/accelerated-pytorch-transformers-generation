@@ -2,7 +2,7 @@ import os
 
 from setuptools import find_packages, setup
 
-REQUIRED_PKGS = ["torch", "transformers"]
+REQUIRED_PKGS = ["torch", "transformers", "gitpython", "seaborn"]
 
 QUALITY_REQUIRE = ["black~=22.0", "flake8>=3.8.3", "isort>=5.0.0", "pyyaml>=5.3.1"]
 

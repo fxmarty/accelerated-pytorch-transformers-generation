@@ -2,11 +2,14 @@ import argparse
 import copy
 import contextlib
 import hashlib
+import os
 from typing import Dict
 
 from tqdm import tqdm
+import pandas as pd
 import torch
-from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
+import git
+from torch.profiler import ProfilerActivity, profile, tensorboard_trace_handler
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -14,14 +17,21 @@ from trfs_fast.llama import LlamaForCausalLM
 from trfs_fast.utils import recurse_getattr, recurse_hasattr, recurse_setattr, recurse_delattr
 
 
+# Default case
 BATCH_SIZES = [1]
 PROMPT_LENGTHS = [1000]
 NEW_TOKENS = [200]
 WARMUP_RUNS = 2
 NUM_RUNS = 5
 
+# Modifiers for profiling (we want a short run)
 PROFILE_NEW_TOKENS = 10
 PROFILE_NUM_RUNS = 1
+
+# Modifiers for parameter sweeps
+SWEEP_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128]
+SWEEP_PROMPT_LENGTHS = [100, 200, 400, 800, 1600]
+SWEEP_NUM_RUNS = 10
 
 parser = argparse.ArgumentParser()
 
@@ -55,6 +65,14 @@ parser.add_argument(
     default="no",
     help="If (and how) to compile the model forward pass with torch.compile",
 )
+parser.add_argument(
+    "--sweep",
+    type=str,
+    choices=["", "batch", "length"],
+    required=False,
+    default="",
+    help="Select which type of sweep to gather data for",
+)
 
 
 def timing_cuda(
@@ -71,15 +89,11 @@ def timing_cuda(
     warmup_start_event = torch.cuda.Event(enable_timing=True)
     warmup_end_event = torch.cuda.Event(enable_timing=True)
 
-    if do_profile:
-        num_runs = PROFILE_NUM_RUNS
-        max_new_tokens = PROFILE_NEW_TOKENS
-
     if preallocate:
         inputs["cache_length"] = cache_length
 
     with torch.no_grad():
-        print("Warming up...")
+        print(f"Warming up ({WARMUP_RUNS} runs)...")
         warmup_start_event.record()
         for _ in range(WARMUP_RUNS):
             res = generate_method(
@@ -149,10 +163,6 @@ device = torch.device("cuda")
 tokenizer = AutoTokenizer.from_pretrained(args.model)
 tokenizer.pad_token = tokenizer.eos_token
 
-header = "batch_size,compile,prompt_length,new_tokens,cache_length,dtype,tok_per_s,max_mem_mb,hash"
-stats = {}
-
-
 if args.preallocate:
     with device:
         original_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
@@ -200,14 +210,27 @@ else:
 if args.compile != "no":
     dynamic = args.compile == "dynamic"
     fullgraph = args.compile == "fullgraph"
-    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=fullgraph, dynamic=dynamic)
+    mode = "reduce-overhead" if not args.sweep else "max-autotune"
+    model.forward = torch.compile(model.forward, mode=mode, fullgraph=fullgraph, dynamic=dynamic)
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
 
-for batch_size in tqdm(BATCH_SIZES):
-    for prompt_length in tqdm(PROMPT_LENGTHS):
-        for max_new_tokens in tqdm(NEW_TOKENS):
+if args.profile and args.sweep:
+    raise ValueError("Cannot profile and sweep at the same time")
+batch_sizes = BATCH_SIZES if args.sweep != "batch" else SWEEP_BATCH_SIZES
+prompt_lengths = PROMPT_LENGTHS if args.sweep != "length" else SWEEP_PROMPT_LENGTHS
+new_tokens = NEW_TOKENS if not args.profile else PROFILE_NEW_TOKENS
+num_runs = NUM_RUNS
+if args.profile:
+    num_runs = PROFILE_NUM_RUNS
+elif args.sweep:
+    num_runs = SWEEP_NUM_RUNS
+
+stats = {}
+for batch_size in tqdm(batch_sizes):
+    for prompt_length in tqdm(prompt_lengths):
+        for max_new_tokens in tqdm(new_tokens):
             cache_length = 1 * (prompt_length + max_new_tokens)
 
             inp = {
@@ -225,19 +248,22 @@ for batch_size in tqdm(BATCH_SIZES):
             print("Cache preallocation:", args.preallocate)
 
             generate_method = model.generate if not args.preallocate else model.generate_minimal
-            time_per_generation, max_memory, sha_hash = timing_cuda(
-                tokenizer=tokenizer,
-                num_runs=NUM_RUNS,
-                inputs=inp,
-                device=device,
-                max_new_tokens=max_new_tokens,
-                cache_length=cache_length,
-                generate_method=generate_method,
-                preallocate=args.preallocate,
-                do_profile=args.profile,
-            )
+            try:
+                time_per_generation, max_memory, sha_hash = timing_cuda(
+                    tokenizer=tokenizer,
+                    num_runs=num_runs,
+                    inputs=inp,
+                    device=device,
+                    max_new_tokens=max_new_tokens,
+                    cache_length=cache_length,
+                    generate_method=generate_method,
+                    preallocate=args.preallocate,
+                    do_profile=args.profile,
+                )
+            except:
+                break  # in a sweep, might get OOM
 
-            tok_per_s = max_new_tokens / time_per_generation
+            tok_per_s = (max_new_tokens * batch_size) / time_per_generation
 
             stats[(batch_size, prompt_length, max_new_tokens)] = {
                 "cache_length": cache_length,
@@ -246,18 +272,29 @@ for batch_size in tqdm(BATCH_SIZES):
                 "max_mem": max_memory
             }
 
-# print csv
-print(header)
+# build dataframe with the results and store it
+rows = []
+repo = git.Repo(search_parent_directories=True)
+current_git_hash = repo.git.rev_parse(repo.head, short=True)
 for key, value in stats.items():
     batch_size, prompt_length, new_tokens = key
-    print(",".join([
-        str(batch_size),
-        args.compile,
-        str(prompt_length),
-        str(new_tokens),
-        str(value["cache_length"]),
-        args.dtype,
-        f"{value['tok_per_s']:.3f}",
-        f"{value['max_mem']:.2f}",
-        value["hash"]])
-    )
+    rows.append({
+        'Preallocate': args.preallocate,
+        'Compile': args.compile,
+        'Batch size': str(batch_size),
+        'Prompt length': str(prompt_length),
+        'New tokens': str(new_tokens),
+        'Cache length': str(value["cache_length"]),
+        'Weights dtype': args.dtype,
+        'Tokens per second': f"{value['tok_per_s']:.3f}",
+        'Max GPU memory (MB)': f"{value['max_mem']:.2f}",
+        'Results hash': value["hash"],
+        'Git hash': current_git_hash,
+    })
+df = pd.DataFrame(rows)
+print(df)
+
+os.makedirs("./results", exist_ok=True)
+output_path = "./results/results_llama.csv"
+df.to_csv(output_path, mode='a', header=not os.path.exists(output_path))
+print(f"Results also appended to {output_path}")
