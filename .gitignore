@@ -1,7 +1,8 @@
 # Initially taken from Github's Python gitignore file
 
-# TB logs
+# Data created by runs (not to be tracked)
 tb_logs/
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

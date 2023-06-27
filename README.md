@@ -27,7 +27,9 @@ You can profile a short run with `--profile`, with the TB logs being stored in `
 python run_llama.py --model huggingface/llama-7b --preallocate --profile
 ```
 
-gives, with `batch_size=1`, `prompt_length=1000`, `new_tokens=200`, `cache_length=1200`, `dtype=fp16`:
+## Results
+
+Running the command above with `batch_size=1`, `prompt_length=1000`, `new_tokens=200`, `cache_length=1200`, `dtype=fp16`:
 
 | changes                                                     | compile | tok_per_s | max_mem_mb | hash     | commit                                   |
 |-------------------------------------------------------------|---------|-----------|------------|----------|------------------------------------------|
@@ -55,4 +57,20 @@ can be edited to run a sweep, for example:
 BATCH_SIZES = [1, 2, 4, 8]
 PROMPT_LENGTHS = [500, 1000, 4000]
 NEW_TOKENS = [1000]
+```
+
+## Predefined sweeps
+
+You can sweep over predefined configurations of batch sizes (for a fixed prompt length) and prompt lengths (for a
+fixed batch size) with the `--sweep` flag, e.g.
+
+```
+python scripts/run_llama.py --model huggingface/llama-7b --sweep batch
+```
+
+If you run the sweep for the multiple generation alternatives (original code, with preallocated tensors, and
+preallocated + compiled), you can easily compare the results with
+
+```
+python scripts/plot_results.py --sweep batch
 ```
