@@ -83,15 +83,14 @@ def timing_cuda(
     inputs: Dict,
     max_new_tokens: int,
     device: torch.device,
-    cache_length: int,
-    preallocate: bool,
     do_profile: bool,
 ):
     warmup_start_event = torch.cuda.Event(enable_timing=True)
     warmup_end_event = torch.cuda.Event(enable_timing=True)
 
-    if preallocate:
-        inputs["cache_length"] = cache_length
+    if do_profile:
+        num_runs = PROFILE_NUM_RUNS
+        max_new_tokens = PROFILE_NEW_TOKENS
 
     with torch.no_grad():
         print(f"Warming up ({WARMUP_RUNS} runs)...")
@@ -256,9 +255,7 @@ for batch_size in tqdm(batch_sizes):
                     inputs=inp,
                     device=device,
                     max_new_tokens=max_new_tokens,
-                    cache_length=cache_length,
                     generate_method=generate_method,
-                    preallocate=args.preallocate,
                     do_profile=args.profile,
                 )
             except:

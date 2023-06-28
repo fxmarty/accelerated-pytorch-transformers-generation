@@ -38,7 +38,6 @@ class GenerationPrefill:
         max_new_tokens: int,
         inputs: Optional[torch.Tensor] = None,
         streamer: Optional["BaseStreamer"] = None,
-        cache_length: Optional[int] = None,
         **model_kwargs
     ) -> torch.LongTensor:
         r"""
@@ -113,13 +112,6 @@ class GenerationPrefill:
         if streamer is not None:
             streamer.put(input_ids.cpu())
 
-        batch_size, context_length = input_ids.shape
-        cache_length = cache_length if cache_length is not None else max_new_tokens
-
-        model_kwargs["valid_past_index"] = torch.tensor(0, dtype=torch.int64)
-        model_kwargs["past_key_values"] = self.get_empty_kv_cache(batch_size=batch_size, cache_length=cache_length, device=input_ids.device, dtype=self.dtype)
-        model_kwargs["attention_mask"] = self.get_preallocated_attention_mask(attention_mask=model_kwargs["attention_mask"], batch_size=batch_size, cache_length=cache_length, device=input_ids.device, context_length=context_length)
-
         # 11. run greedy search
         return self.greedy_search_minimal(
             input_ids,
@@ -180,8 +172,9 @@ class GenerationPrefill:
 
         # keep track of which sequences are already finished
         unfinished_sequences = torch.ones((input_ids.shape[0], 1), dtype=torch.long, device=input_ids.device)
+        max_length = input_ids.shape[-1] + max_new_tokens
+        min_length = input_ids.shape[-1] + min_new_tokens
 
-        counter = 0
         result = input_ids
         while True:
             # prepare model inputs
@@ -194,7 +187,6 @@ class GenerationPrefill:
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
             )
-            counter += 1
 
             # argmax
             next_tokens = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
@@ -206,14 +198,11 @@ class GenerationPrefill:
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
             input_ids = next_tokens
-
-            # update generated ids, model inputs, and length for next step
             result = torch.cat([result, next_tokens], dim=-1)
+            cur_len = result.shape[-1]
+
             if streamer is not None:
                 streamer.put(next_tokens.cpu())
-            model_kwargs = self.__update_model_kwargs_for_generation(
-                outputs, model_kwargs, model_inputs
-            )
 
             # TODO: not sure this is correct anymore with the keepdim=True
             # if eos_token was found in one sentence, set sentence to finished
@@ -223,12 +212,17 @@ class GenerationPrefill:
                 )
 
                 # stop when each sentence is finished
-                if unfinished_sequences.max() == 0 and counter >= min_new_tokens:
+                if unfinished_sequences.max() == 0 and cur_len >= min_length:
                     break
 
             # stop if we exceed the maximum length
-            if counter >= max_new_tokens:
+            if cur_len >= max_length:
                 break
+
+            # Update tensors for the next iteration
+            model_kwargs = self.__update_model_kwargs_for_generation(
+                outputs, model_kwargs, model_inputs, max_length, cur_len
+            )
 
         if streamer is not None:
             streamer.end()
@@ -239,26 +233,43 @@ class GenerationPrefill:
         self,
         outputs: ModelOutput,
         model_kwargs: Dict[str, Any],
-        model_inputs: Dict[str, Any]
+        model_inputs: Dict[str, Any],
+        max_length: int,
+        cur_len: int
     ) -> Dict[str, Any]:
-        model_kwargs["valid_past_index"] += outputs.logits.shape[1]
 
-        if getattr(outputs, "state", None) is not None:
-            model_kwargs["state"] = outputs.state
+        batch_size, _, _ = outputs.logits.shape
+        device = outputs.logits.device
 
-        # update attention mask
-        """
-        if "attention_mask" in model_kwargs:
-            attention_mask = model_kwargs["attention_mask"]
-            model_kwargs["attention_mask"] = torch.cat(
-                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
-            )
-        """
-        position_ids = model_inputs["position_ids"]
-        if position_ids.shape[1] > 1:
-            model_kwargs["position_ids"] = position_ids[:, -1:] + 1
+        # Create and fill fixed-sized tensors. This only occurs once, after the prefilling step. Note: at each
+        # generation step, in the attention layer, the KV values will be placed in the last position of
+        # `past_key_values` -- for that reason, the attention mask must always hold a 1 in the last position.
+        if "past_key_values" in model_inputs and model_inputs["past_key_values"] is None:
+            # create tensors for the maximum size
+            padded_attention = torch.zeros(batch_size, max_length, dtype=torch.int64, device=device)
+            padded_past_key_values = get_empty_kv_cache(config=self.config, batch_size=batch_size, max_length=max_length, device=device, dtype=self.dtype)
+            # fill with the existing values
+            padded_attention[:, :cur_len - 1] = model_inputs["attention_mask"]
+            padded_attention[:, -1] = 1  # the token being generated is appened in the last postion
+            for i in range(len(padded_past_key_values)):
+                padded_past_key_values[i][..., :cur_len - 1, :] = outputs.past_key_values[i]
+            # set them to the variable expected by `generate`
+            model_kwargs["attention_mask"] = padded_attention
+            model_kwargs["past_key_values"] = padded_past_key_values
+
+            # also update the positions ids, from the previous position ids
+            model_kwargs["position_ids"] = model_inputs["position_ids"][:, -1] + 1
         else:
-            model_kwargs["position_ids"] = position_ids + 1
+            # Position ids update: simply add one
+            model_kwargs["position_ids"] += 1
+            # Attention mask update: add a one in the position to backfill (corresponding to the token that was just
+            # selected)
+            backfill_pos = cur_len - 2
+            model_kwargs["attention_mask"][:, backfill_pos] = 1
+            # past_key_values update: Move the cache appended on the last position to its permanent position
+            for i in range(len(model_kwargs["past_key_values"])):
+                model_kwargs["past_key_values"][i][..., backfill_pos, :] = outputs.past_key_values[i][..., -1, :]
+                model_kwargs["past_key_values"][i][..., -1, :] *= 0  # see inductor bug mentioned in the attn layer
 
         # NOTE: token_type_ids is not used by llama so we don't care about this one for now
         # update token_type_ids with last value
@@ -267,3 +278,19 @@ class GenerationPrefill:
             model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
 
         return model_kwargs
+
+
+def get_empty_kv_cache(config, batch_size: int, max_length: int, dtype: torch.dtype, device: torch.device):
+    past_key_values = [
+        torch.zeros(
+            2,
+            batch_size,
+            config.num_attention_heads,
+            max_length,
+            config.hidden_size // config.num_attention_heads,  # head dimension
+            dtype=dtype,
+            device=device
+        )
+        for _ in range(config.num_hidden_layers)
+    ]
+    return past_key_values

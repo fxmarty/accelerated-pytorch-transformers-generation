@@ -194,7 +194,6 @@ class LlamaAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
-        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions is True:
             raise ValueError("output_attentions=True can not be supported with BetterTransformer.")
@@ -208,41 +207,29 @@ class LlamaAttention(nn.Module):
         key_value_states = query_key_value_states[1:]
 
         # key_value_states used only for dtype here
-        cos, sin = self.rotary_emb(key_value_states, seq_len=valid_past_index + q_len)
+        cos, sin = self.rotary_emb(key_value_states)
         query_states = apply_rotary_pos_emb_opt(query_states, key_value_states[0], cos, sin, position_ids)
 
-        # slice end is equivalent to "if valid_past_index > 0: = valid_past_index + 1; else: = q_len"
-        past_kv_slice_start = valid_past_index
-        past_kv_slice_end = torch.eq(valid_past_index, 0).int() * q_len + torch.ne(valid_past_index, 0).int() * (valid_past_index + 1)
-        past_state_slice_end = torch.eq(valid_past_index, 0).int() * key_value_states.shape[-2] + torch.ne(valid_past_index, 0).int() * (past_kv_slice_end)
-        past_key_value[..., past_kv_slice_start:past_kv_slice_end, :] = key_value_states
-        key_states, value_states = past_key_value[..., :past_state_slice_end, :]
-
-        if bsz == 1 or self.training:
-            # BEWARE: at this stage, attention_mask is not the same as in transformers llama
-            if query_states.shape[2] > 1:
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states, key_states, value_states, attn_mask=None, dropout_p=0.0, is_causal=True
-                )
-            else:
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states, key_states, value_states, attn_mask=None, dropout_p=0.0, is_causal=False
-                )
+        # the key/value states are placed on the last position of the past_key_value tensor (if it is not prefilling)
+        if past_key_value is None:
+            past_key_value = key_value_states
         else:
-            # This line is necessary for numerical equivalence, although I'm not sure it is useful in any way.
-            attention_mask = torch.max(attention_mask, self.min_allowed)
+            # past_key_value[..., -1:, :] = key_value_states -> causes a bug in the inductor, replaced by += and zero setting outside the generation loop
+            past_key_value[..., -1:, :] += key_value_states
+        key_states, value_states = past_key_value
 
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-            )
+        # This line is necessary for numerical equivalence, although I'm not sure it is useful in any way.
+        attention_mask = torch.max(attention_mask, self.min_allowed)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
 
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
 
-        # TODO (felix) returning past_key_value with static cache is probably useless?
-        return attn_output, None, None
+        return attn_output, None, past_key_value
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -265,7 +252,6 @@ class LlamaDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
-        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -289,7 +275,6 @@ class LlamaDecoderLayer(nn.Module):
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
-            valid_past_index=valid_past_index,
         )
         hidden_states = residual + hidden_states
 
@@ -485,7 +470,6 @@ class LlamaModel(LlamaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -504,7 +488,11 @@ class LlamaModel(LlamaPreTrainedModel):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         seq_length_with_past = seq_length
-        past_key_values_length = valid_past_index
+        past_key_values_length = 0
+
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+            seq_length_with_past = seq_length_with_past + past_key_values_length
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -523,11 +511,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
 
-        # As we use SDPA, we simply don't care about the attention mask in the batch size = 1 case
-        if batch_size > 1:
-            attention_mask = self._prepare_decoder_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-            )
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+        )
 
         hidden_states = inputs_embeds
 
@@ -565,7 +551,6 @@ class LlamaModel(LlamaPreTrainedModel):
                     position_ids=position_ids,
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
-                    valid_past_index=valid_past_index,
                 )
 
             hidden_states = layer_outputs[0]
@@ -622,25 +607,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
     def get_decoder(self):
         return self.model
 
-    def get_empty_kv_cache(self, batch_size: int, cache_length: int, dtype: torch.dtype, device: torch.device):
-        past_key_values = [torch.empty(
-                    2,
-                    batch_size,
-                    self.config.num_attention_heads,
-                    cache_length,
-                    self.config.hidden_size // self.config.num_attention_heads,  # head dimension
-                    dtype=dtype,
-                    device=device
-                )
-            for _ in range(self.config.num_hidden_layers)]
-        return past_key_values
-
-    def get_preallocated_attention_mask(self, attention_mask: torch.Tensor, batch_size: int, cache_length: int, device: torch.device, context_length: int):
-        attention_mask_buffer = torch.ones(batch_size, cache_length, dtype=torch.int64, device=device)
-        attention_mask_buffer[:, :context_length] = attention_mask
-
-        return attention_mask_buffer
-
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -654,7 +620,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -698,7 +663,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            valid_past_index=valid_past_index,
         )
 
         hidden_states = outputs[0]
@@ -732,13 +696,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
-        valid_past_index = kwargs.get("valid_past_index", torch.tensor(0, dtype=torch.int64))
 
-        if valid_past_index > 0:
+        if past_key_values is not None:
             input_ids = input_ids[:, -1:]
 
+        # 1st iteration: create the positions ids; subsequent: use it directly (to avoid a cumsum op)
         position_ids = kwargs.get("position_ids", None)
-        # create position_ids
         if position_ids is None:
             attention_mask_slice = attention_mask[:, :input_ids.shape[1]]
             position_ids = attention_mask_slice.long().cumsum(-1) - 1
@@ -755,7 +718,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
                 "position_ids": position_ids,
                 "past_key_values": past_key_values,
                 "attention_mask": attention_mask,
-                "valid_past_index": valid_past_index,
             }
         )
         return model_inputs
