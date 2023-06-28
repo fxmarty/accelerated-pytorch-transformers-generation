@@ -104,44 +104,55 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
 
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
+    # def forward(self, x, seq_len=None):
+    #     # x: [bs, num_attention_heads, seq_len, head_size]
+    #     # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
 
-        # raises control flow exception
-        # if seq_len > self.max_seq_len_cached:
-        #     self.max_seq_len_cached = seq_len
-        #     t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
-        #     freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        #     # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        #     emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-        #     self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
-        #     self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
+    #     # raises control flow exception
+    #     # if seq_len > self.max_seq_len_cached:
+    #     #     self.max_seq_len_cached = seq_len
+    #     #     t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+    #     #     freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+    #     #     # Different from paper, but it uses a different permutation in order to obtain the same calculation
+    #     #     emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+    #     #     self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
+    #     #     self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
 
-        return (
-            self.cos_cached.to(dtype=x.dtype),
-            self.sin_cached.to(dtype=x.dtype),
-        )
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x = torch.roll(x, shifts=x.shape[-1] // 2, dims=-1)
-    x[..., : x.shape[-1] // 2] *= -1
-    return x
+    #     return (
+    #         self.cos_cached.to(dtype=x.dtype),
+    #         self.sin_cached.to(dtype=x.dtype),
+    #     )
 
 
+# def rotate_half(x):
+#     """Rotates half the hidden dims of the input."""
+#     x = torch.roll(x, shifts=x.shape[-1] // 2, dims=-1)
+#     x[..., : x.shape[-1] // 2] *= -1
+#     return x
 
-def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
+
+
+# def apply_rotary_pos_emb_opt(q, key_states, cos, sin, position_ids):
+def apply_rotary_pos_emb_opt(q, key_states, cos, sin):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     # TODO: can we remove some squeeze/unsqueeze?
     # TODO: replace by squeeze(0, 1) once https://github.com/pytorch/pytorch/issues/103875 is fixed
-    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    key_states.copy_((key_states * cos) + (rotate_half(key_states) * sin))
+    # cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    # sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+    # cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    # sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    half_dim = cos.shape[-1] // 2
+    q_embed = (q * cos)
+    q_embed[..., half_dim:] += q[..., :half_dim] * sin[..., half_dim:]
+    q_embed[..., :half_dim] += q[..., half_dim:] * sin[..., :half_dim] * -1
+
+    k_embed = (key_states * cos)
+    k_embed[..., half_dim:] += key_states[..., :half_dim] * sin[..., half_dim:]
+    k_embed[..., :half_dim] += key_states[..., half_dim:] * sin[..., :half_dim] * -1
+    key_states.copy_(k_embed)
+
+    # q_embed = (q * cos) + (rotate_half(q) * sin)
+    # key_states.copy_((key_states * cos) + (rotate_half(key_states) * sin))
     return q_embed
 
 
@@ -191,7 +202,8 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        # position_ids: Optional[torch.LongTensor] = None,
+        cos_sin: Optional[Tuple[torch.Tensor]] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
@@ -208,8 +220,10 @@ class LlamaAttention(nn.Module):
         key_value_states = query_key_value_states[1:]
 
         # key_value_states used only for dtype here
-        cos, sin = self.rotary_emb(key_value_states, seq_len=valid_past_index + q_len)
-        query_states = apply_rotary_pos_emb_opt(query_states, key_value_states[0], cos, sin, position_ids)
+        # cos, sin = self.rotary_emb(key_value_states, seq_len=valid_past_index + q_len)
+        # query_states = apply_rotary_pos_emb_opt(query_states, key_value_states[0], cos, sin, position_ids)
+        cos, sin = cos_sin
+        query_states = apply_rotary_pos_emb_opt(query_states, key_value_states[0], cos, sin)
 
         # slice end is equivalent to "if valid_past_index > 0: = valid_past_index + 1; else: = q_len"
         past_kv_slice_start = valid_past_index
@@ -262,7 +276,8 @@ class LlamaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        # position_ids: Optional[torch.LongTensor] = None,
+        cos_sin: Optional[Tuple[torch.Tensor]] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         valid_past_index: torch.Tensor = torch.tensor(0, dtype=torch.int64),
@@ -286,7 +301,8 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
+            # position_ids=position_ids,
+            cos_sin=cos_sin,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             valid_past_index=valid_past_index,
@@ -505,9 +521,9 @@ class LlamaModel(LlamaPreTrainedModel):
 
         seq_length_with_past = seq_length
         past_key_values_length = valid_past_index
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
 
         if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
                 past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
             )
@@ -536,6 +552,14 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = ()
 
+        # compute cos sin, which are reused in all layers
+        cos, sin = get_all_cos_sin(
+            dim=self.config.hidden_size // self.config.num_attention_heads,
+            device=device,
+            dtype=hidden_states.dtype
+        )
+        cos, sin = get_pos_cos_sin(cos, sin, position_ids)
+
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -555,14 +579,14 @@ class LlamaModel(LlamaPreTrainedModel):
                     create_custom_forward(decoder_layer),
                     hidden_states,
                     attention_mask,
-                    position_ids,
+                    (cos, sin),
                     None,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
-                    position_ids=position_ids,
+                    cos_sin=(cos, sin),
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     valid_past_index=valid_past_index,
@@ -759,3 +783,17 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationPrefill):
             }
         )
         return model_inputs
+
+
+def get_all_cos_sin(dim, max_position_embeddings=2048, base=10000, device=None, dtype=None):
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+    t = torch.arange(max_position_embeddings, device=inv_freq.device, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    return emb.cos().to(dtype), emb.sin().to(dtype)
+
+
+def get_pos_cos_sin(cos, sin, position_ids):
+    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    return cos, sin
