@@ -3,6 +3,7 @@ import copy
 import contextlib
 import hashlib
 import os
+import traceback
 from typing import Dict
 
 from tqdm import tqdm
@@ -25,7 +26,7 @@ WARMUP_RUNS = 2
 NUM_RUNS = 5
 
 # Modifiers for profiling (we want a short run)
-PROFILE_NEW_TOKENS = 10
+PROFILE_NEW_TOKENS = [10]
 PROFILE_NUM_RUNS = 1
 
 # Modifiers for parameter sweeps
@@ -261,6 +262,7 @@ for batch_size in tqdm(batch_sizes):
                     do_profile=args.profile,
                 )
             except:
+                traceback.print_exc()
                 break  # in a sweep, might get OOM
 
             tok_per_s = (max_new_tokens * batch_size) / time_per_generation
