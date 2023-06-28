@@ -3,6 +3,7 @@ import copy
 import contextlib
 import hashlib
 import os
+import traceback
 from typing import Dict
 
 from tqdm import tqdm
@@ -25,7 +26,7 @@ WARMUP_RUNS = 2
 NUM_RUNS = 5
 
 # Modifiers for profiling (we want a short run)
-PROFILE_NEW_TOKENS = 10
+PROFILE_NEW_TOKENS = [10]
 PROFILE_NUM_RUNS = 1
 
 # Modifiers for parameter sweeps
