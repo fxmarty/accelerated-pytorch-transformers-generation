@@ -200,7 +200,7 @@ else:
 if args.compile != "no":
     dynamic = args.compile == "dynamic"
     fullgraph = args.compile == "fullgraph"
-    model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=fullgraph, dynamic=dynamic)
+    model.forward = torch.compile(model.forward, fullgraph=fullgraph, dynamic=dynamic)
 
 if model.config.model_type != "llama":
     raise ValueError("This script currently only supports LLAMA")
