@@ -116,7 +116,7 @@ class GenerationPrefill:
         batch_size, context_length = input_ids.shape
         cache_length = cache_length if cache_length is not None else max_new_tokens
 
-        model_kwargs["valid_past_index"] = torch.tensor(0, dtype=torch.int64)
+        model_kwargs["valid_past_index"] = 0
         model_kwargs["past_key_values"] = self.get_empty_kv_cache(batch_size=batch_size, cache_length=cache_length, device=input_ids.device, dtype=self.dtype)
         model_kwargs["attention_mask"] = self.get_preallocated_attention_mask(attention_mask=model_kwargs["attention_mask"], batch_size=batch_size, cache_length=cache_length, device=input_ids.device, context_length=context_length)
 
